@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <string.h>
 
 typedef uint8_t U8;
 typedef uint32_t U32;
@@ -20,18 +21,21 @@ U64 djb2(U8 *bytes, size_t bytes_count)
 }
 
 #define HashTableInitSize 256
+static_assert(HashTableInitSize != 0 && (HashTableInitSize & (HashTableInitSize - 1)) == 0, "HashTableInitSize must be a power of two");
 
 typedef struct Bucket Bucket;
 struct Bucket {
-    float key;
-    int value;
+    void *key;
+    size_t key_count;
+    void *value;
     bool taken;
 };
 
-Bucket bucket_make(float key, int value) 
+Bucket bucket_make(void *key, size_t key_count, void *value) 
 {
     return (Bucket) {
         .key = key,
+        .key_count = key_count,
         .value = value,
         .taken = true,
     };
@@ -44,16 +48,12 @@ struct HashTable {
     size_t capacity;
 };
 
-size_t ht_index(float key, size_t capacity);
-void ht_extend(HashTable *ht);
-void ht_insert(HashTable *ht, float key, int value);
-bool ht_get(HashTable *ht, float key, int *value);
-
-size_t ht_index(float key, size_t capacity)
+size_t ht_index(void *key, size_t key_count, size_t capacity)
 {
-    // TODO: Abuse the fact that our capacity is a power of two
-    return djb2((U8*) &key, sizeof(key)) % capacity;
+    return djb2((U8*) &key, key_count) & (capacity - 1);
 }
+
+void ht_insert_sized_key(HashTable *ht, void *key, size_t key_count, void *value);
 
 void ht_extend(HashTable *ht)
 {
@@ -70,7 +70,7 @@ void ht_extend(HashTable *ht)
         for (size_t i = 0; i < ht->capacity; ++i) {
             Bucket it = ht->buckets[i];
             if (it.taken) {
-                ht_insert(&new_hash_table, it.key, it.value);
+                ht_insert_sized_key(&new_hash_table, it.key, it.key_count, it.value);
             }
         }
 
@@ -79,42 +79,44 @@ void ht_extend(HashTable *ht)
     }
 }
 
-void ht_insert(HashTable *ht, float key, int value)
+void ht_insert_sized_key(HashTable *ht, void *key, size_t key_count, void *value)
 {
     if (ht->count >= ht->capacity) {
         ht_extend(ht);
     }
 
-    U64 index = ht_index(key, ht->capacity);
+    U64 index = ht_index(key, key_count, ht->capacity);
     for (size_t i = 0; ht->buckets[index].taken && i < ht->capacity; ++i) {
         index = (index + i) % ht->capacity;
+        printf("INFO: Collision\n");
     }
     assert(!ht->buckets[index].taken);
 
-    ht->buckets[index] = bucket_make(key, value);
+    ht->buckets[index] = bucket_make(key, key_count, value);
     ht->count++;
 }
 
-bool ht_get(HashTable *ht, float key, int *value)
-{
-    size_t index = ht_index(key, ht->capacity);
-    if (!ht->buckets[index].taken) {
-        return false;
-    }
+#define ht_insert(ht, key, value) ht_insert_sized_key(ht, key, sizeof(key), value)
+#define ht_insert_cstr(ht, key, value) ht_insert_sized_key(ht, (void*) key, strlen(key), value)
 
+void *ht_get_sized_key(HashTable *ht, void *key, size_t key_count)
+{
+    size_t index = ht_index(key, key_count, ht->capacity);
+    if (!ht->buckets[index].taken) {
+        return NULL;
+    }
     for (size_t i = 0; ht->buckets[index].key != key && i < ht->capacity; ++i) {
         index = (index + i) % ht->capacity;
+        printf("INFO: Collision\n");
     }
     if (ht->buckets[index].key != key) {
-        return false;
+        return NULL;
     }
-
-    if (value) {
-        *value = ht->buckets[index].value;
-    }
-
-    return true;
+    return ht->buckets[index].value;
 }
+
+#define ht_get(ht, key) ht_get_sized_key(ht, (void*) key, sizeof(key))
+#define ht_get_cstr(ht, key) ht_get_sized_key(ht, (void*) key, strlen(key))
 
 #define ArrayCount(a) (sizeof(a) / sizeof(a[0]))
 
@@ -143,16 +145,16 @@ int main(void)
     static_assert(ArrayCount(keys) == ArrayCount(values), "Please make sure the two arrays are of equal length.");
 
     for (size_t i = 0; i < ArrayCount(keys); ++i) {
-        ht_insert(&ht, keys[i], values[i]);
+        ht_insert(&ht, &keys[i], &values[i]);
     }
 
     for (size_t i = 0; i < ArrayCount(keys); ++i) {
-        int value;
-        if (ht_get(&ht, keys[i], &value)) {
-            if (value != values[i]) {
-                fprintf(stderr, "ERROR: Expected %2d but got %2d\n", values[i], value);
+        int *value = ht_get(&ht, &keys[i]);
+        if (value) {
+            if (*value != values[i]) {
+                fprintf(stderr, "ERROR: Expected %2d but got %2d\n", values[i], *value);
             } else {
-                printf("%f => %d\n", keys[i], value);
+                printf("%f => %d\n", keys[i], *value);
             }
         } else {
             fprintf(stderr, "ERROR: Could not get value for key: %2f\n", keys[i]);
@@ -160,11 +162,21 @@ int main(void)
     }
 
     float not_present_key = 64.2;
-    int value;
-    if (ht_get(&ht, not_present_key, &value)) {
-        printf("%f => %d\n", not_present_key, value);
+    int *value = ht_get(&ht, &not_present_key);
+    if (value) {
+        printf("%f => %d\n", not_present_key, *value);
     } else {
         fprintf(stderr, "ERROR: Could not get value for key: %f\n", not_present_key);
+    }
+
+    char *name = "John Doe";
+    char *foo = "Hello world";
+    ht_insert_cstr(&ht, name, &foo);
+    char **result = ht_get_cstr(&ht, name);
+    if (result) {
+        printf("%s => %s\n", name, *result);
+    } else {
+        fprintf(stderr, "ERROR: Could not get value for key: %s\n", name);
     }
 
     return 0;

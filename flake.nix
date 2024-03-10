@@ -9,8 +9,6 @@
     {
       devShell = pkgs.mkShell {
         buildInputs = with pkgs; [
-          gdb
-          gf
           gcc
         ];
       };
